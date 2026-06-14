@@ -27,8 +27,8 @@ GOOGLE_SHEET_ID    = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_CREDS_JSON  = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 SYMBOL   = "BTCUSDT"
-INTERVAL = "15m"
-BINANCE  = "https://fapi.binance.com"
+INTERVAL = "15"        # Bybit uses minutes as number (15 not "15m")
+BYBIT    = "https://api.bybit.com"
 ALERT_FILE = "last_alert.json"
 START_BAL  = 2006.0   # update when your balance changes
 
@@ -90,24 +90,51 @@ def save_last_candle(candle):
         pass
 
 # ============================================================
-# FETCH BINANCE
+# FETCH BYBIT (replaces Binance - not geo-blocked by US servers)
+# Bybit BTCUSDT Perpetual = same instrument as Binance BTCUSDT Futures
+# No API key needed for public market data
 # ============================================================
 
 def fetch_klines(symbol, interval, limit=300):
+    """
+    Bybit V5 linear kline endpoint.
+    Returns: [startTime, open, high, low, close, volume, turnover]
+    Bybit returns newest first — we reverse to oldest-first for our calcs.
+    """
     r = SESSION.get(
-        f"{BINANCE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": interval, "limit": limit},
+        f"{BYBIT}/v5/market/kline",
+        params={
+            "category": "linear",
+            "symbol":   symbol,
+            "interval": interval,
+            "limit":    limit,
+        },
         timeout=15
     )
     r.raise_for_status()
-    df = pd.DataFrame(r.json(), columns=[
-        'open_time','open','high','low','close','volume',
-        'close_time','quote_vol','trades',
-        'taker_buy_base','taker_buy_quote','ignore'
+    data = r.json()
+
+    if data.get("retCode") != 0:
+        raise Exception(f"Bybit API error: {data.get('retMsg')}")
+
+    rows = data["result"]["list"]   # newest → oldest
+    rows = list(reversed(rows))     # flip to oldest → newest
+
+    df = pd.DataFrame(rows, columns=[
+        'open_time','open','high','low','close','volume','turnover'
     ])
-    for c in ['open','high','low','close','volume','taker_buy_base']:
+    for c in ['open','high','low','close','volume','turnover']:
         df[c] = pd.to_numeric(df[c])
-    print(f"[BINANCE] {len(df)} candles | BTC @ {df['close'].iloc[-1]:.2f}")
+    df['open_time'] = pd.to_numeric(df['open_time'])
+
+    # CVD uses taker_buy_base — Bybit kline doesn't provide it.
+    # We estimate using price direction (same method as our Pine Script):
+    #   bull candle → buyers dominated → taker_buy ≈ full volume
+    #   bear candle → sellers dominated → taker_buy ≈ 0
+    bull_candle = df['close'] >= df['open']
+    df['taker_buy_base'] = np.where(bull_candle, df['volume'], 0)
+
+    print(f"[BYBIT] {len(df)} candles | BTC @ {df['close'].iloc[-1]:.2f}")
     return df.reset_index(drop=True)
 
 # ============================================================
