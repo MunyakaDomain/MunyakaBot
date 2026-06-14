@@ -97,46 +97,110 @@ def save_last_candle(candle):
 
 def fetch_klines(symbol, interval, limit=300):
     """
-    Bybit V5 linear kline endpoint.
-    Returns: [startTime, open, high, low, close, volume, turnover]
-    Bybit returns newest first — we reverse to oldest-first for our calcs.
+    Fetch candles from Bybit.
+    If Bybit fails (403/429/etc), automatically fall back to Binance.
     """
-    r = SESSION.get(
-        f"{BYBIT}/v5/market/kline",
-        params={
-            "category": "linear",
-            "symbol":   symbol,
-            "interval": interval,
-            "limit":    limit,
-        },
-        timeout=15
-    )
-    r.raise_for_status()
-    data = r.json()
 
-    if data.get("retCode") != 0:
-        raise Exception(f"Bybit API error: {data.get('retMsg')}")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
 
-    rows = data["result"]["list"]   # newest → oldest
-    rows = list(reversed(rows))     # flip to oldest → newest
+        r = SESSION.get(
+            "https://api.bybit.com/v5/market/kline",
+            params={
+                "category": "linear",
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit
+            },
+            headers=headers,
+            timeout=15
+        )
 
-    df = pd.DataFrame(rows, columns=[
-        'open_time','open','high','low','close','volume','turnover'
-    ])
-    for c in ['open','high','low','close','volume','turnover']:
-        df[c] = pd.to_numeric(df[c])
-    df['open_time'] = pd.to_numeric(df['open_time'])
+        r.raise_for_status()
 
-    # CVD uses taker_buy_base — Bybit kline doesn't provide it.
-    # We estimate using price direction (same method as our Pine Script):
-    #   bull candle → buyers dominated → taker_buy ≈ full volume
-    #   bear candle → sellers dominated → taker_buy ≈ 0
-    bull_candle = df['close'] >= df['open']
-    df['taker_buy_base'] = np.where(bull_candle, df['volume'], 0)
+        data = r.json()
 
-    print(f"[BYBIT] {len(df)} candles | BTC @ {df['close'].iloc[-1]:.2f}")
-    return df.reset_index(drop=True)
+        if data.get("retCode") != 0:
+            raise Exception(f"Bybit Error: {data}")
 
+        rows = list(reversed(data["result"]["list"]))
+
+        df = pd.DataFrame(rows, columns=[
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "turnover"
+        ])
+
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # Approximation for CVD calculations
+        df["taker_buy_base"] = np.where(
+            df["close"] >= df["open"],
+            df["volume"],
+            0
+        )
+
+        print(f"[BYBIT] {len(df)} candles | {symbol}")
+
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+
+        print(f"[BYBIT FAILED] {e}")
+        print("[FALLBACK] Switching to Binance")
+
+        r = SESSION.get(
+            "https://fapi.binance.com/fapi/v1/klines",
+            params={
+                "symbol": symbol,
+                "interval": BINANCE_INTERVAL,
+                "limit": limit
+            },
+            timeout=15
+        )
+
+        r.raise_for_status()
+
+        rows = r.json()
+
+        df = pd.DataFrame(rows, columns=[
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore"
+        ])
+
+        for c in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "taker_buy_base"
+        ]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        print(f"[BINANCE] {len(df)} candles | {symbol}")
+
+        return df.reset_index(drop=True)
+        BYBIT_INTERVAL = "15"
+        BINANCE_INTERVAL = "15m"
 # ============================================================
 # PINE HELPERS
 # ============================================================
@@ -524,7 +588,16 @@ def main():
     print("=" * 55)
 
     # 1. Fetch market data
+    try:
     df = fetch_klines(SYMBOL, INTERVAL, limit=300)
+
+    if df is None or len(df) < 50:
+        print("[ERROR] Not enough candle data")
+        return
+
+except Exception as e:
+    print(f"[FATAL DATA ERROR] {e}")
+    return
 
     # 2. Run all 3 indicators
     cvd_sig, cvd_b, cvd_s                                  = calc_cvd(df)
