@@ -28,6 +28,8 @@ GOOGLE_CREDS_JSON  = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 SYMBOL   = "BTCUSDT"
 INTERVAL = "15"        # Bybit uses minutes as number (15 not "15m")
+BYBIT_INTERVAL = "15"
+BINANCE_INTERVAL = "15m"
 BYBIT    = "https://api.bybit.com"
 ALERT_FILE = "last_alert.json"
 START_BAL  = 2006.0   # update when your balance changes
@@ -199,8 +201,7 @@ def fetch_klines(symbol, interval, limit=300):
         print(f"[BINANCE] {len(df)} candles | {symbol}")
 
         return df.reset_index(drop=True)
-        BYBIT_INTERVAL = "15"
-        BINANCE_INTERVAL = "15m"
+
 # ============================================================
 # PINE HELPERS
 # ============================================================
@@ -589,23 +590,23 @@ def main():
 
     # 1. Fetch market data
     try:
-    df = fetch_klines(SYMBOL, INTERVAL, limit=300)
+        df = fetch_klines(SYMBOL, INTERVAL, limit=300)
 
-    if df is None or len(df) < 50:
-        print("[ERROR] Not enough candle data")
+        if df is None or len(df) < 50:
+            print("[ERROR] Not enough candle data")
+            return
+
+    except Exception as e:
+        print(f"[FATAL DATA ERROR] {e}")
         return
-
-except Exception as e:
-    print(f"[FATAL DATA ERROR] {e}")
-    return
 
     # 2. Run all 3 indicators
     cvd_sig, cvd_b, cvd_s                                  = calc_cvd(df)
     rsi_sig, rsi_l, rsi_s, rsi_val, ema50, ema200          = calc_rsi_div(df)
     tl_sig, tl_l, tl_s, bb, bk, br, sr, te50, te200, atr, res, sup = calc_trendline(df)
 
-    ema50  = ema50  or te50
-    ema200 = ema200 or te200
+    ema50  = ema50 if ema50 is not None else te50
+    ema200 = ema200 if ema200 is not None else te200
 
     # 3. Score confluence
     tier, direction, conf = score_signals(cvd_b, cvd_s, rsi_l, rsi_s, tl_l, tl_s, ema50, ema200)
